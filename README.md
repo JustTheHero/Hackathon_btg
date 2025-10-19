@@ -9,7 +9,24 @@
 - Possibilidade de verificar investimentos via WhatsApp
 - Alertas sazonais
 
+O modelo pré-treinado deve ser ficar localizado na pasta frontend.<br>
 Link para modelo fine-tunado: https://drive.google.com/drive/folders/1gdUY1CYgHhibtGwIJvZvSQvdco9jQ6hh?usp=sharing
+
+## Execução
+
+### Ligar servidor Flask
+
+```bash
+cd frontend/src
+python modelo.py
+```
+
+### Executar aplicação
+```bash
+cd frontend
+npm install
+node bot.js
+```
 
 ## Membros
 
