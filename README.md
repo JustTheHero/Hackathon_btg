@@ -18,6 +18,7 @@ Link para modelo fine-tunado: https://drive.google.com/drive/folders/1gdUY1CYgHh
 
 ```bash
 cd frontend
+pip install -r requirements.txt
 python modelo.py
 ```
 
