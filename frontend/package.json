@@ -8,6 +8,8 @@
     "dev": "nodemon bot.js"
   },
   "dependencies": {
+    "@google/generative-ai": "^0.24.1",
+    "@nlpjs/basic": "^5.0.0-alpha.5",
     "axios": "^1.12.2",
     "dotenv": "^16.6.1",
     "express": "^4.21.2",
