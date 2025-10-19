@@ -13,6 +13,6 @@ Link para modelo fine-tunado: https://drive.google.com/drive/folders/1gdUY1CYgHh
 
 ## Membros
 
-[Juan Henrique Marques Jordão](github.com/JustTheHero)
-[Fernando Valentim Torres](github.com/fernandovtorres)
+[Juan Henrique Marques Jordão](github.com/JustTheHero)<br>
+[Fernando Valentim Torres](github.com/fernandovtorres)<br>
 [Pedro Teidi de Sá Yamacita](github.com/PedroYamacita)
