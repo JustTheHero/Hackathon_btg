@@ -17,7 +17,7 @@ Link para modelo fine-tunado: https://drive.google.com/drive/folders/1gdUY1CYgHh
 ### Ligar servidor Flask
 
 ```bash
-cd frontend/src
+cd frontend
 python modelo.py
 ```
 
@@ -25,6 +25,7 @@ python modelo.py
 ```bash
 cd frontend
 npm install
+cd src
 node bot.js
 ```
 
