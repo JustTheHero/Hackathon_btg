@@ -10,13 +10,13 @@ const app = express();
 app.use(express.json());
 
 // --- CONFIGURAÇÃO DAS APIs ---
-const ZAPSTER_API_URL = process.env.ZAPSTER_API_URL;
-const ZAPSTER_TOKEN = process.env.ZAPSTER_TOKEN;
-const ZAPSTER_INSTANCE_ID = process.env.ZAPSTER_INSTANCE_ID;
-const FLASK_SERVER_URL = process.env.FLASK_SERVER_URL;
+const ZAPSTER_API_URL = 'https://api.zapsterapi.com/v1/wa';
+const ZAPSTER_TOKEN = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpYXQiOjE3MjgxNjA1ODMsImlzcyI6InphcHN0ZXJhcGkiLCJzdWIiOiJmNTM3MzIxYS05NDg4LTRjZWItOTcwOC1jZmE2ODkwN2I3NmYiLCJqdGkiOiI2MGUwM2MyMy04YTgwLTRjNTAtOTU1NC02ZWU5ODJjZWRmZjAifQ.LGb9vPKOxN3W9Ke8DxTweEaGFfApKhll5666c62L9RU";
+const ZAPSTER_INSTANCE_ID = "xhnhbs8cy4wxrkkf0h1jc";
+const FLASK_SERVER_URL = 'http://localhost:5000/classificar'; // URL do servidor Flask
 
 // --- CONFIGURAÇÃO DA API GEMINI ---
-const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
+const GEMINI_API_KEY = "AIzaSyD7GchJ5FvnUUE74rLKo66nBWYtyBtYjC4";
 if (!GEMINI_API_KEY) {
     throw new Error("A variável de ambiente GEMINI_API_KEY não está definida.");
 }
@@ -537,7 +537,7 @@ async function processarComando(telefone, mensagem, messageCount = 1) {
     if (msgLower.includes('pagamento') || msgLower.includes('pagar')) {
         return lidarComPagamento(telefone, msg);
     }
-    if (['menu principal', 'voltar ao menu', 'menu', 'oi', 'olá', 'ola', 'eae', 'e aí', 'e aí?', '.',  '!', 'a'].includes(msgLower)) {
+    if (['menu principal', 'voltar ao menu', 'menu', 'oi', 'olá', 'ola', 'eae', 'e aí', 'e aí?', '.',  '!'].includes(msgLower)) {
         return enviarMensagemComBotoes(telefone, `Olá, ${usuario.nome}! Sou sua assistente financeira. Como posso ajudar?`,
             [{ label: 'Ver Saldo', type: 'reply' }, { label: 'Meus Gastos', type: 'reply' }, { label: 'Minhas Metas', type: 'reply' }]
         );
