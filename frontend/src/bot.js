@@ -8,12 +8,11 @@ const app = express();
 app.use(express.json());
 
 // --- CONFIGURAÇÃO DAS APIs ---
-const ZAPSTER_API_URL = 'https://api.zapsterapi.com/v1/wa';
-const ZAPSTER_TOKEN = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpYXQiOjE3MjgxNjA1ODMsImlzcyI6InphcHN0ZXJhcGkiLCJzdWIiOiJmNTM3MzIxYS05NDg4LTRjZWItOTcwOC1jZmE2ODkwN2I3NmYiLCJqdGkiOiI2MGUwM2MyMy04YTgwLTRjNTAtOTU1NC02ZWU5ODJjZWRmZjAifQ.LGb9vPKOxN3W9Ke8DxTweEaGFfApKhll5666c62L9RU';
-const ZAPSTER_INSTANCE_ID = 'xhnhbs8cy4wxrkkf0h1jc';
+const ZAPSTER_API_URL = "coiso;
+const ZAPSTER_TOKEN = "coiso";
 
 // --- CONFIGURAÇÃO DA API GEMINI ---
-const GEMINI_API_KEY = "AIzaSyD7GchJ5FvnUUE74rLKo66nBWYtyBtYjC4";
+const GEMINI_API_KEY = "coiso";
 if (!GEMINI_API_KEY) {
     throw new Error("A variável de ambiente GEMINI_API_KEY não está definida. Crie um arquivo .env");
 }
