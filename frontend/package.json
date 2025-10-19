@@ -15,10 +15,14 @@
   "author": "",
   "license": "ISC",
   "dependencies": {
-
+    "@google/generative-ai": "^0.24.1",
+    "@nlpjs/basic": "^5.0.0-alpha.5",
+    "axios": "^1.12.2",
+    "dotenv": "^16.6.1",
+    "express": "^4.21.2",
+    "node-cron": "^3.0.3"
   },
   "devDependencies": {
     "nodemon": "^3.0.1"
   }
 }
-

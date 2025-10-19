@@ -1,26 +1,27 @@
+// Importa as dependências necessárias
 require('dotenv').config();
 const express = require('express');
 const axios = require('axios');
 const cron = require('node-cron');
-const { GoogleGenerativeAI } = require('@google/generative-ai');
+const { GoogleGenerativeAI } = require("@google/generative-ai");
 
+// Inicializa o servidor Express
 const app = express();
 app.use(express.json());
 
 // --- CONFIGURAÇÃO DAS APIs ---
-const ZAPSTER_API_URL = 'https://api.zapsterapi.com/v1/wa';
-const ZAPSTER_TOKEN = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpYXQiOjE3MjgxNjA1ODMsImlzcyI6InphcHN0ZXJhcGkiLCJzdWIiOiJmNTM3MzIxYS05NDg4LTRjZWItOTcwOC1jZmE2ODkwN2I3NmYiLCJqdGkiOiI2MGUwM2MyMy04YTgwLTRjNTAtOTU1NC02ZWU5ODJjZWRmZjAifQ.LGb9vPKOxN3W9Ke8DxTweEaGFfApKhll5666c62L9RU';
-const ZAPSTER_INSTANCE_ID = 'xhnhbs8cy4wxrkkf0h1jc';
+const ZAPSTER_API_URL = process.env.ZAPSTER_API_URL;
+const ZAPSTER_TOKEN = process.env.ZAPSTER_TOKEN;
+const ZAPSTER_INSTANCE_ID = process.env.ZAPSTER_INSTANCE_ID;
+const FLASK_SERVER_URL = process.env.FLASK_SERVER_URL;
 
 // --- CONFIGURAÇÃO DA API GEMINI ---
-const GEMINI_API_KEY = "AIzaSyD7GchJ5FvnUUE74rLKo66nBWYtyBtYjC4";
+const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
 if (!GEMINI_API_KEY) {
-    throw new Error("A variável de ambiente GEMINI_API_KEY não está definida. Crie um arquivo .env");
+    throw new Error("A variável de ambiente GEMINI_API_KEY não está definida.");
 }
 const genAI = new GoogleGenerativeAI(GEMINI_API_KEY);
-// CORREÇÃO: Atualizado o nome do modelo para um mais recente e compatível.
-const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash-latest" });
-
+const geminiModel = genAI.getGenerativeModel({ model: "gemini-2.0-flash-exp" });
 
 // --- DADOS MOCK (BANCO DE DADOS SIMULADO) ---
 const dadosMock = {
@@ -34,9 +35,6 @@ const dadosMock = {
     data_pagamento: 30,
     decimo_terceiro: '05-12-2025',
     ferias: '20-10-2025',
-    meta: null,
-    valor_meta: 0,
-    data_fim_meta: null,
     contas_recorrentes: [
         { nome: 'Financiamento', valor: 2500, vencimento: 10 },
         { nome: 'Condomínio', valor: 200, vencimento: 10 },
@@ -58,8 +56,32 @@ const dadosMock = {
         { nome: 'Internet', valor: 50 },
         { nome: 'Gás', valor: 30 }
     ],
-    dias_mais_gastos: [5, 10, 15, 20, 25]
+    dias_mais_gastos: [5, 10, 20],
+    possiveis_pagamentos: [
+        { nome: 'Financiamento', vencimento: 10, valor: '' },
+        { nome: 'Pix festa', vencimento: 10, valor: '' },
+        { nome: 'Conta de Água', vencimento: 15, valor: '' },
+        { nome: 'Conta de Luz', vencimento: 15, valor: '' },
+        { nome: 'Internet', vencimento: 15, valor: '' },
+        { nome: 'Gás', vencimento: 15, valor: '' }
+    ]
 };
+
+const usuariosDB = {};
+
+function getDadosUsuario(telefone) {
+    if (!usuariosDB[telefone]) {
+        console.log(`[DB] Criando nova sessão para o usuário: ${telefone}`);
+        usuariosDB[telefone] = {
+            ...JSON.parse(JSON.stringify(dadosMock)),
+            telefone: telefone,
+            meta: null,
+            valor_meta: 0,
+            data_fim_meta: null
+        };
+    }
+    return usuariosDB[telefone];
+}
 
 // --- FUNÇÕES DE MENSAGERIA (ZAPSTER) ---
 async function enviarMensagem(telefone, mensagem) {
@@ -98,78 +120,151 @@ async function enviarMensagemComBotoes(telefone, mensagem, botoes) {
     }
 }
 
+// --- LÓGICA DE IA INTEGRADA (APRIMORADA) ---
 
-// --- FUNÇÕES DE ANÁLISE DE METAS (COM IA) ---
-function parseMetaFormatoEstrito(input) {
-    const partes = input.split(',').map(p => p.trim());
-    if (partes.length !== 3) return null;
-
-    const [valorStr, descricao, dataStr] = partes;
-    const valorNumerico = parseFloat(valorStr.replace('R$', '').trim());
-    if (isNaN(valorNumerico) || valorNumerico <= 0) return null;
-    if (!descricao) return null;
-    if (!/^\d{2}-\d{2}-\d{4}$/.test(dataStr)) return null;
-
-    const [dia, mes, ano] = dataStr.split('-').map(Number);
-    const dataObj = new Date(ano, mes - 1, dia);
-    const hoje = new Date();
-    hoje.setHours(0, 0, 0, 0);
-
-    if (dataObj.getFullYear() !== ano || dataObj.getMonth() !== mes - 1 || dataObj.getDate() !== dia || dataObj < hoje) {
-        return null;
-    }
-    return { valor: valorNumerico, descricao: descricao, data: dataStr };
+function limparTexto(texto) {
+    if (!texto) return '';
+    return texto.replace(/\s\s+/g, ' ').trim();
 }
 
-async function analisarMetaComGemini(textoUsuario) {
-    console.log("[LOG: Formato estrito falhou. Acionando Gemini API...]");
+function criarPrompt(textoEnriquecido) {
+    const dataAtual = new Date().toLocaleDateString('pt-BR');
+    return `
+    Sua tarefa é atuar como um assistente financeiro que extrai informações de forma estruturada. Analise o texto e retorne APENAS um objeto JSON válido. A data de hoje é ${dataAtual}.
 
-    const hoje = new Date().toLocaleDateString('pt-BR');
-    const prompt = `
-        Analise o texto do usuário para extrair uma meta financeira. Extraia os seguintes três campos: 'valor', 'descricao' e 'data'.
-        A data deve ser formatada como DD-MM-AAAA. Se o ano não for especificado, assuma o ano atual ou o próximo, o que fizer mais sentido.
-        Se qualquer um dos campos não puder ser extraído, retorne null para aquele campo.
-        A data de hoje é ${hoje}. Use-a como referência para termos como "fim do ano", "daqui a 6 meses", etc.
+    **REGRAS:**
+    1.  **CLASSIFICAÇÃO**: Classifique o texto em "Metas", "Investimentos", "Gastos", "Dicas", ou "Nenhum".
+    2.  **EXTRAÇÃO PARA METAS**: Se o tema for "Metas", extraia "evento", "data" e "valor".
+    3.  **GERAR PERGUNTAS**: Se um dado da meta estiver faltando, o campo correspondente deve conter a pergunta para o usuário.
+    4.  **DATAS**: Se o usuário mencionar um mês sem dia (ex: "em dezembro"), assuma o dia 1 do próximo ano (2025).
 
-        Texto do usuário: "${textoUsuario}"
+    **EXEMPLO 1 (META COMPLETA):**
+    - TEXTO: "quero juntar mil reais para a viagem dos sonhos em dezembro"
+    - JSON: 
+    {
+      "tema": "Metas",
+      "dados_extraidos": { "evento": "viagem dos sonhos", "data": "01/12/2025", "valor": 1000 }
+    }
+    ---
+    **EXEMPLO 2 (META INCOMPLETA):**
+    - TEXTO: "Preciso comprar um carro novo até o final do ano."
+    - JSON: 
+    {
+      "tema": "Metas",
+      "dados_extraidos": { "evento": "comprar carro novo", "data": "Podemos agendar para uma data específica no final de 2025?", "valor": "Qual o valor estimado para o carro novo?" }
+    }
+    ---
+    **TEXTO PARA ANÁLISE, PARA CASOS ONDE A DATA LIMITE SEJA UM MÊS, DEFINA O DIA DE CADA MÊS COMO 1:**
+    ${textoEnriquecido}
 
-        Retorne a resposta APENAS no seguinte formato JSON, sem nenhum texto adicional ou formatação markdown:
-        {"valor": [numero], "descricao": "[string]", "data": "[DD-MM-AAAA]"}`;
+    **JSON DE SAÍDA:**
+  `;
+}
 
+    const filaDePrompts = [];
+    let processandoFila = false;
+
+    async function analisarTextoComIA(textoUsuario, telefone) {
+    const textoLimpo = limparTexto(textoUsuario);
+    const prompt = criarPrompt(textoLimpo);
+
+    return new Promise((resolve, reject) => {
+        filaDePrompts.push({ prompt, telefone, resolve, reject });
+        if (!processandoFila) {
+        processarFila();
+        }
+    });
+    }
+
+    async function processarFila() {
+    processandoFila = true;
+
+    while (filaDePrompts.length > 0) {
+        const { prompt, telefone, resolve, reject } = filaDePrompts[0]; 
+        try {
+        console.log(`[IA] Processando (${filaDePrompts.length - 1} restantes)...`);
+
+        const result = await geminiModel.generateContent(prompt);
+        const response = await result.response;
+        const responseText = response.text();
+
+        const cleanedResponse = responseText
+            .trim()
+            .replace(/```json/g, "")
+            .replace(/```/g, "");
+
+        const resultadoLLM = JSON.parse(cleanedResponse);
+        console.log("[IA] Resultado da análise:", JSON.stringify(resultadoLLM, null, 2));
+
+        resolve(resultadoLLM);
+        } catch (error) {
+        console.error(`ERRO AO PROCESSAR COM IA: "${prompt}"`, error);
+        resolve({ tema: "Erro", texto: prompt });
+        }
+
+        filaDePrompts.shift();
+        await esperar(1500);
+    }
+
+    processandoFila = false;
+    }
+
+    function esperar(ms) {
+    return new Promise((resolve) => setTimeout(resolve, ms));
+    }
+
+
+
+async function classificarComModeloLocal(texto) {
+    if (!texto) return { tema: null, confianca: 0 };
     try {
-        const result = await model.generateContent(prompt);
-        const response = result.response;
-        const textResponse = response.text();
-
-        console.log("[LOG: Resposta crua da API]:", textResponse);
-        const jsonString = textResponse.replace(/```json/g, '').replace(/```/g, '').trim();
-        const dadosExtraidos = JSON.parse(jsonString);
-        return dadosExtraidos;
-
+        const response = await axios.post(FLASK_SERVER_URL, { frase: texto });
+        console.log('[BERT] Resposta do servidor local:', response.data);
+        return response.data;
     } catch (error) {
-        console.error("[ERRO: Falha ao chamar ou processar a resposta da API Gemini]:", error);
-        return null;
+        console.error('ERRO AO CONECTAR COM O SERVIDOR DE CLASSIFICAÇÃO LOCAL:', error.message);
+        return { tema: null, confianca: 0 };
     }
 }
 
+function decidirTemaFinal(resultadoGemini, resultadoModeloLocal) {
+    const temaGemini = resultadoGemini.tema;
+    const temaLocal = resultadoModeloLocal.tema;
+    const confiancaLocal = resultadoModeloLocal.confianca;
 
-// --- FUNÇÕES DE LÓGICA DE NEGÓCIO (FINANÇAS) ---
-function analisarHabitos() {
-    const totalGastos = dadosMock.principais_gastos.reduce((acc, g) => acc + g.valor, 0);
-    const porcentagemRenda = (totalGastos / dadosMock.renda) * 100;
-    const saldoMensal = dadosMock.renda - totalGastos;
-    const categorias = agruparPorCategoria(dadosMock.principais_gastos);
-    const categoriasMaiores = Object.entries(categorias).sort((a, b) => b[1] - a[1]).slice(0, 3);
+    console.log(`[Decisão] Comparando Gemini (${temaGemini}) vs. Modelo Local (${temaLocal} com ${confiancaLocal.toFixed(2)} de confiança)`);
 
+    if (temaGemini === 'Nenhum') {
+        console.log(`[Decisão] Tema final definido como 'Nenhum' (prioridade do Gemini).`);
+        return 'Nenhum';
+    }
+    if (confiancaLocal > 0.90) {
+        console.log(`[Decisão] Tema final definido pelo modelo local (alta confiança): ${temaLocal}`);
+        return temaLocal;
+    }
+    if ((temaGemini === 'Erro') && confiancaLocal > 0.70) {
+        console.log(`[Decisão] Tema final definido pelo modelo local (Gemini incerto): ${temaLocal}`);
+        return temaLocal;
+    }
+    if (temaGemini && temaLocal && temaGemini.toLowerCase() === temaLocal.toLowerCase()) {
+        console.log(`[Decisão] Modelos concordam. Tema final: ${temaGemini}`);
+        return temaGemini;
+    }
+    console.log(`[Decisão] Tema final definido pelo Gemini (padrão): ${temaGemini}`);
+    return temaGemini;
+}
+
+function analisarHabitos(usuario) {
+    const totalGastos = usuario.principais_gastos.reduce((acc, g) => acc + g.valor, 0);
+    const porcentagemRenda = (totalGastos / usuario.renda) * 100;
+    const saldoMensal = usuario.renda - totalGastos;
     return {
         totalGastos,
         porcentagemRenda,
         saldoMensal,
-        categoriasMaiores,
         status: porcentagemRenda > 90 ? 'crítico' : porcentagemRenda > 70 ? 'atenção' : 'saudável'
     };
 }
-
 function agruparPorCategoria(gastos) {
     const categorias = {
         'Moradia': 0, 'Alimentação': 0, 'Transporte': 0,
@@ -191,8 +286,7 @@ function agruparPorCategoria(gastos) {
     });
     return categorias;
 }
-
-function sugerirInvestimentos(valor) {
+function sugerirInvestimentos(usuario, valor) {
     const sugestoes = {
         'Conservador': [
             { nome: 'Tesouro Selic', percentual: 50, retorno: '100% CDI' },
@@ -212,464 +306,372 @@ function sugerirInvestimentos(valor) {
             { nome: 'FIIs', percentual: 10, retorno: 'Dividendos' }
         ]
     };
-    const perfil = dadosMock.possivel_perfil_investimento;
+    const perfil = usuario.possivel_perfil_investimento;
     const distribuicao = sugestoes[perfil].map(inv => ({
         ...inv,
         valor: (valor * inv.percentual / 100).toFixed(2)
     }));
     return { perfil, distribuicao };
 }
+function calcularProgressoMeta(telefone) {
+    const usuario = getDadosUsuario(telefone);
+    if (!usuario.meta || !usuario.data_fim_meta) return null;
 
-function calcularProgressoMeta() {
-    if (!dadosMock.meta) return null;
-    const analise = analisarHabitos();
+    const analise = analisarHabitos(usuario);
     const hoje = new Date();
-    const dataFim = new Date(dadosMock.data_fim_meta.split('-').reverse().join('-'));
+    const [dia, mes, ano] = usuario.data_fim_meta.split('-').map(Number);
+    const dataFim = new Date(ano, mes - 1, dia);
+
+    if (isNaN(dataFim.getTime())) return null;
+
     const diasRestantes = Math.ceil((dataFim - hoje) / (1000 * 60 * 60 * 24));
-    const economiaAtual = dadosMock.investimentos + analise.saldoMensal;
-    const progresso = (economiaAtual / dadosMock.valor_meta) * 100;
-    const necessarioPorMes = (dadosMock.valor_meta - economiaAtual) / Math.max(diasRestantes / 30, 1);
-    
+    const economiaAtual = usuario.investimentos;
+    const progresso = (economiaAtual / usuario.valor_meta) * 100;
+    const necessarioPorMes = (usuario.valor_meta - economiaAtual) / Math.max(diasRestantes / 30, 1);
+
     let mensagem = `Seu progresso: ${progresso.toFixed(1)}%\n`;
-    mensagem += `Você economizou: R$ ${economiaAtual.toFixed(2)}\n`;
+    mensagem += `Você já tem: R$ ${economiaAtual.toFixed(2)}\n`;
     mensagem += `Faltam ${Math.max(diasRestantes, 0)} dias.\n\n`;
-    
+
     if (progresso >= 100) {
-        mensagem += `Parabéns! Sua meta de R$ ${dadosMock.valor_meta.toFixed(2)} foi atingida!`;
+        mensagem += `Parabéns! Sua meta de R$ ${usuario.valor_meta.toFixed(2)} foi atingida!`;
     } else if (necessarioPorMes <= analise.saldoMensal) {
-        mensagem += `Você está no caminho certo! Continue economizando.`;
+        mensagem += `Você está no caminho certo! Continue economizando R$ ${analise.saldoMensal.toFixed(2)} por mês.`;
     } else {
-        mensagem += `Você precisa economizar R$ ${necessarioPorMes.toFixed(2)} por mês.`;
+        mensagem += `Atenção! Para atingir sua meta, você precisa economizar R$ ${necessarioPorMes.toFixed(2)} por mês. Seu saldo atual é de R$ ${analise.saldoMensal.toFixed(2)}.`;
     }
     return { progresso, mensagem, necessarioPorMes };
 }
-
-function gerarDicasPersonalizadas(analise) {
+function gerarDicasPersonalizadas(usuario, analise) {
     const dicas = [];
     if (analise.porcentagemRenda > 80) {
         dicas.push('Seus gastos estão altos! Tente reduzir 10% de seus gastos não essenciais.');
     }
-    const categoriaMaior = analise.categoriasMaiores[0];
-    if (categoriaMaior[0] !== 'Moradia' && categoriaMaior[1] > dadosMock.renda * 0.2) {
+    const categoriaMaior = Object.entries(agruparPorCategoria(usuario.principais_gastos)).sort((a, b) => b[1] - a[1])[0];
+    if (categoriaMaior && categoriaMaior[0] !== 'Moradia' && categoriaMaior[1] > usuario.renda * 0.2) {
         dicas.push(`Você está gastando muito em ${categoriaMaior[0]}. Você gastou R$ ${categoriaMaior[1].toFixed(2)}. Considere alternativas mais econômicas.`);
     }
-    if (dadosMock.dias_mais_gastos.length > 0) {
-        dicas.push(`Você gasta mais nos dias ${dadosMock.dias_mais_gastos.slice(0, 3).join(', ')}. Tente reduzir gastos nestes dias.`);
+    if (usuario.dias_mais_gastos.length > 0) {
+        dicas.push(`Você gasta mais nos dias ${usuario.dias_mais_gastos.slice(0, 3).join(', ')}. Tente reduzir gastos nestes dias.`);
     }
     if (analise.saldoMensal > 500) {
         dicas.push(`Você tem R$ ${analise.saldoMensal.toFixed(2)} sobrando! Que tal investir 70% disso?`);
-    }
-    const comprasOnline = dadosMock.principais_gastos.find(g => g.nome.includes('Compras'));
-    if (comprasOnline && comprasOnline.valor > 200) {
-        dicas.push(`Suas compras online estão em R$ ${comprasOnline.valor}. Compre com consciência.`);
+        enviarMensagemComBotoes(telefone, `Investir ${analise.saldoMensal.toFixed(2)} ou outro valor?`, [
+            { label: 'Investir', type: 'reply' },
+            { label: 'Voltar ao Menu', type: 'reply' }
+        ]);
     }
     return dicas.length > 0 ? dicas : ['Seus hábitos financeiros estão saudáveis! Continue assim'];
 }
-
-function gerarRelatorioMensal(mes) {
-    const analise = analisarHabitos();
-    const nomeMes = new Date(2025, mes - 1).toLocaleDateString('pt-BR', { month: 'long' });
+function gerarRelatorioMensal(usuario, mes) {
+    const analise = analisarHabitos(usuario);
+    const nomeMes = new Date(new Date().getFullYear(), mes - 1).toLocaleDateString('pt-BR', { month: 'long' });
     let relatorio = `Relatório Mensal - ${nomeMes}\n\n`;
     relatorio += `Resumo Geral\n`;
-    relatorio += `Entradas: R$ ${dadosMock.renda.toFixed(2)}\n`;
+    relatorio += `Entradas: R$ ${usuario.renda.toFixed(2)}\n`;
     relatorio += `Saídas: R$ ${analise.totalGastos.toFixed(2)}\n`;
-    relatorio += `Saldo: R$ ${analise.saldoMensal.toFixed(2)}\n`;
-    relatorio += `Comprometimento: ${analise.porcentagemRenda.toFixed(1)}%\n\n`;
+    relatorio += `Saldo: R$ ${analise.saldoMensal.toFixed(2)}\n\n`;
     relatorio += `Gastos por Categoria\n`;
-    Object.entries(agruparPorCategoria(dadosMock.principais_gastos)).sort((a, b) => b[1] - a[1]).forEach(([cat, valor]) => {
+    Object.entries(agruparPorCategoria(usuario.principais_gastos)).sort((a, b) => b[1] - a[1]).forEach(([cat, valor]) => {
         if (valor > 0) {
             const perc = (valor / analise.totalGastos * 100).toFixed(1);
             relatorio += `${cat}: R$ ${valor.toFixed(2)} (${perc}%)\n`;
         }
     });
-    relatorio += `\nStatus Financeiro: `;
-    relatorio += analise.status === 'saudável' ? 'Saudável' : analise.status === 'atenção' ? 'Atenção' : 'Crítico';
     return relatorio;
+}
+function extrairDadosPagamento(mensagem, usuario) {
+    const msgLower = mensagem.toLowerCase();
+    let contaEncontrada = null;
+    let valorEncontrado = null;
+    for (const conta of usuario.possiveis_pagamentos) {
+        const nomeConta = conta.nome.toLowerCase();
+        if (msgLower.includes(nomeConta)) {
+            contaEncontrada = conta.nome;
+            break;
+        }
+    }
+    if (!contaEncontrada) return null;
+    const regexValor = /(?:R\$\s?)?(\d{1,5}(?:[.,]\d{1,2})?)/;
+    const match = msgLower.match(regexValor);
+    if (match && match[1]) {
+        valorEncontrado = parseFloat(match[1].replace(',', '.'));
+    }
+    if (contaEncontrada && valorEncontrado > 0) {
+        return { nome: contaEncontrada, valor: valorEncontrado };
+    }
+    return null;
+}
+function verificarSaudeFinanceiraAposPagamento(usuario, valorPagamento) {
+    const analiseAtual = analisarHabitos(usuario);
+    const novoTotalGastos = analiseAtual.totalGastos + valorPagamento;
+    const novoSaldo = usuario.renda - novoTotalGastos;
+    const limiteSaudavel = usuario.renda * 0.15;
+    return { saudavel: novoSaldo >= limiteSaudavel, novoSaldo: novoSaldo };
+}
+async function lidarComPagamento(telefone, mensagem) {
+    const usuario = getDadosUsuario(telefone);
+    const dadosPagamento = extrairDadosPagamento(mensagem, usuario);
+
+    if (!dadosPagamento) {
+        await enviarMensagem(telefone, "Não consegui identificar a conta e o valor para o pagamento. Por favor, tente novamente.");
+        return;
+    }
+
+    const { nome, valor } = dadosPagamento;
+    const saudeFinanceira = verificarSaudeFinanceiraAposPagamento(usuario, valor);
+    let aviso = !saudeFinanceira.saudavel ? `\n\n*Atenção!*\nApós este pagamento, seu saldo será de R$ ${saudeFinanceira.novoSaldo.toFixed(2)}.` : "";
+
+    conversasAtivas[telefone].state = 'AGUARDANDO_CONFIRMACAO_PAGAMENTO';
+    conversasAtivas[telefone].dadosPagamentoParaConfirmar = { nome, valor };
+
+    await enviarMensagemComBotoes(telefone, `Confirmar pagamento de:\n\n*Conta:* ${nome}\n*Valor:* R$ ${valor.toFixed(2)}${aviso}\n\nConfirma?`, [
+        { label: 'Sim, confirmar', type: 'reply' },
+        { label: 'Cancelar', type: 'reply' }
+    ]);
+}
+
+// --- PROCESSADOR DE COMANDOS ---
+const conversasAtivas = {};
+
+function processarDadosMeta(dados) {
+    const resultado = { evento: null, data: null, valor: null };
+    for (const [campo, valor] of Object.entries(dados)) {
+        if (typeof valor === 'string' && !valor.toLowerCase().includes('qual') && !valor.toLowerCase().includes('podemos')) {
+            resultado[campo] = valor;
+        } else if (typeof valor === 'number') {
+            resultado[campo] = valor;
+        }
+    }
+    return { dadosCompletos: resultado };
+}
+
+async function apresentarMetaParaConfirmacao(telefone, dadosExtraidos) {
+    const { dadosCompletos } = processarDadosMeta(dadosExtraidos);
+    conversasAtivas[telefone].state = 'AGUARDANDO_CONFIRMACAO_META';
+    conversasAtivas[telefone].dadosMetaParaConfirmar = dadosCompletos;
+
+    const objetivo = dadosCompletos.evento ? `*Objetivo:* ${dadosCompletos.evento}` : '*Objetivo:* Não identificado';
+    const valor = dadosCompletos.valor ? `*Valor:* R$ ${dadosCompletos.valor.toFixed(2)}` : '*Valor:* Não identificado';
+    const data = dadosCompletos.data ? `*Data limite:* ${dadosCompletos.data}` : '*Data limite:* Não identificada';
+
+    const mensagemConfirmacao = `Entendi a seguinte meta:\n\n${objetivo}\n${valor}\n${data}\n\nAs informações estão corretas?`;
+
+    await enviarMensagemComBotoes(telefone, mensagemConfirmacao, [
+        { label: 'Sim, criar meta', type: 'reply' },
+        { label: 'Digitar novamente', type: 'reply' },
+        { label: 'Voltar ao Menu', type: 'reply' }
+    ]);
 }
 
 
-// --- PROCESSADOR PRINCIPAL DE COMANDOS ---
-const conversasAtivas = {};
-
-async function processarComando(telefone, mensagem) {
+async function processarComando(telefone, mensagem, messageCount = 1) {
     const msg = mensagem.trim();
+    const msgLower = msg.toLowerCase();
     const state = conversasAtivas[telefone]?.state;
+    const usuario = getDadosUsuario(telefone);
 
-    // --- State Machine: Lida com estados de conversa ativos primeiro ---
-    if (state === 'AGUARDANDO_META') {
-        // Lida com o cancelamento
-        if (['cancelar', 'voltar', 'menu'].includes(msg.toLowerCase())) {
-            conversasAtivas[telefone].state = null; // Limpa o estado
-            await enviarMensagem(telefone, "Criação de meta cancelada.");
-            await processarComando(telefone, 'Menu Principal'); // Mostra o menu principal
-            return;
-        }
-
-        let userInput = msg;
-        let metaInfo;
-
-        // Verifica se o usuário usou o formato de palavra-chave específico
-        if (msg.toLowerCase().startsWith('meta criar')) {
-            userInput = msg.substring('meta criar'.length).trim();
-            metaInfo = parseMetaFormatoEstrito(userInput);
-        }
-
-        // Se o formato estrito falhou OU se o usuário não usou a palavra-chave, usa o Gemini
-        if (!metaInfo) {
-            metaInfo = await analisarMetaComGemini(userInput);
-        }
-        
-        // IMPORTANTE: Sempre limpa o estado após processar a mensagem
-        conversasAtivas[telefone].state = null;
-
-        // Processa o resultado do parser ou do Gemini
-        if (metaInfo && metaInfo.valor && metaInfo.descricao && metaInfo.data) {
-            dadosMock.valor_meta = metaInfo.valor;
-            dadosMock.data_fim_meta = metaInfo.data;
-            dadosMock.meta = metaInfo.descricao;
-            await enviarMensagemComBotoes(
-                telefone,
-                `Meta criada com sucesso!\n\n` +
-                `*${dadosMock.meta}*\n` +
-                `R$ ${dadosMock.valor_meta.toFixed(2)}\n` +
-                `Até ${dadosMock.data_fim_meta}\n\n` +
-                `O que deseja fazer agora?`,
-                [
-                    { label: 'Dicas p/ Atingir', type: 'reply' },
-                    { label: 'Ver Investimentos', type: 'reply' },
-                    { label: 'Voltar ao Menu', type: 'reply' }
-                ]
-            );
+    // --- State Machine ---
+    if (state === 'AGUARDANDO_CONFIRMACAO_PAGAMENTO') {
+        if (msgLower === 'sim, confirmar') {
+            const { nome, valor } = conversasAtivas[telefone].dadosPagamentoParaConfirmar;
+            usuario.principais_gastos.push({ nome: `Pagamento - ${nome}`, valor: valor });
+            conversasAtivas[telefone].state = null;
+            await enviarMensagem(telefone, `Pagamento de R$ ${valor.toFixed(2)} para "${nome}" registrado!`);
+            return processarComando(telefone, 'Ver Saldo', messageCount);
         } else {
-            await enviarMensagemComBotoes(
-                telefone,
-                `Não consegui extrair todos os detalhes da sua meta (valor, descrição e data). 🤔\n\n` +
-                `Vamos tentar de novo?`,
-                [
-                    { label: 'Criar Nova Meta', type: 'reply' },
-                    { label: 'Voltar ao Menu', type: 'reply' },
-                ]
+            conversasAtivas[telefone].state = null;
+            await enviarMensagem(telefone, "Operação cancelada.");
+            return processarComando(telefone, 'Menu Principal', messageCount);
+        }
+    }
+
+    if (state === 'AGUARDANDO_CONFIRMACAO_META') {
+        const dadosConfirmados = conversasAtivas[telefone].dadosMetaParaConfirmar;
+        const metaCompleta = dadosConfirmados && dadosConfirmados.evento && dadosConfirmados.data && dadosConfirmados.valor;
+
+        if (msgLower === 'sim, criar meta') {
+            if (!metaCompleta) {
+                conversasAtivas[telefone].state = 'AGUARDANDO_META';
+                conversasAtivas[telefone].dadosParciais = dadosConfirmados;
+                let msgFaltante = "Ainda faltam algumas informações para criar sua meta:\n\n";
+                if (!dadosConfirmados.evento) msgFaltante += `- Qual é o objetivo?\n`;
+                if (!dadosConfirmados.data) msgFaltante += `- Qual é a data limite?\n`;
+                if (!dadosConfirmados.valor) msgFaltante += `- Qual o valor a ser juntado?\n`;
+                msgFaltante += "\nPor favor, me responda com os dados que faltam ou digite *menu*.";
+                return enviarMensagem(telefone, msgFaltante);
+            }
+            usuario.meta = dadosConfirmados.evento;
+            usuario.data_fim_meta = dadosConfirmados.data.replace(/\//g, '-');
+            usuario.valor_meta = dadosConfirmados.valor;
+            conversasAtivas[telefone].state = null;
+            return enviarMensagemComBotoes(telefone, `Meta criada com sucesso!\n\n*${usuario.meta}*\nR$ ${usuario.valor_meta.toFixed(2)}\nAté ${usuario.data_fim_meta}`,
+                [{ label: 'Ver Progresso', type: 'reply' }, { label: 'Voltar ao Menu', type: 'reply' }]
+            );
+        } else if (msgLower === 'digitar novamente') {
+            conversasAtivas[telefone].state = 'AGUARDANDO_META';
+            conversasAtivas[telefone].dadosParciais = null;
+            return enviarMensagem(telefone, `Ok, vamos tentar de novo!\n\nDiga-me qual é a sua meta, incluindo objetivo, valor e data.`);
+        } else {
+            conversasAtivas[telefone].state = null;
+            return processarComando(telefone, 'Menu Principal', messageCount);
+        }
+    }
+    
+    if (state === 'AGUARDANDO_META') {
+        if (['voltar', 'menu'].includes(msgLower)) {
+            conversasAtivas[telefone].state = null;
+            return processarComando(telefone, 'Menu Principal', messageCount);
+        }
+        const analise = await analisarTextoComIA(msg);
+        const dadosPrevios = conversasAtivas[telefone].dadosParciais || {};
+        if (analise.tema === "Metas" && analise.dados_extraidos) {
+            const { dadosCompletos: novosDados } = processarDadosMeta(analise.dados_extraidos);
+            const dadosMesclados = { ...dadosPrevios, ...novosDados };
+            return apresentarMetaParaConfirmacao(telefone, dadosMesclados);
+        } else {
+            return enviarMensagem(telefone, "Ainda não consegui entender os detalhes. Por favor, tente informar o que falta ou digite *menu* para voltar.");
+        }
+    }
+
+    if (msgLower.includes('pagamento') || msgLower.includes('pagar')) {
+        return lidarComPagamento(telefone, msg);
+    }
+    if (['menu principal', 'voltar ao menu', 'menu', 'oi', 'olá', 'ola', 'eae', 'e aí', 'e aí?', '.',  '!', 'a'].includes(msgLower)) {
+        return enviarMensagemComBotoes(telefone, `Olá, ${usuario.nome}! Sou sua assistente financeira. Como posso ajudar?`,
+            [{ label: 'Ver Saldo', type: 'reply' }, { label: 'Meus Gastos', type: 'reply' }, { label: 'Minhas Metas', type: 'reply' }]
+        );
+    }
+    if (msgLower === 'ver saldo') {
+        const analise = analisarHabitos(usuario);
+        const statusEmoji = analise.status === 'saudável' ? '' : analise.status === 'atenção' ? '' : '';
+        const mensagemSaldo = `Resumo Financeiro ${statusEmoji}\n\n` +
+            `Renda: R$ ${usuario.renda.toFixed(2)}\n` +
+            `Gastos: R$ ${analise.totalGastos.toFixed(2)}\n` +
+            `*Saldo: R$ ${analise.saldoMensal.toFixed(2)}*\n\n` + 'O que deseja fazer?';
+        return enviarMensagemComBotoes(telefone, mensagemSaldo, [
+             { label: 'Analisar Gastos', type: 'reply' }, { label: 'Ver Contas', type: 'reply' }
+        ]);
+    }
+     if (['meus gastos', 'analisar gastos'].includes(msgLower)) {
+        const analise = analisarHabitos(usuario);
+        const categorias = agruparPorCategoria(usuario.principais_gastos);
+        const categoriasMaiores = Object.entries(categorias).sort((a,b) => b[1] - a[1]).slice(0,3);
+        let resposta = `Análise de Gastos\n\nTotal: R$ ${analise.totalGastos.toFixed(2)}\n\n*Principais categorias:*\n`;
+        categoriasMaiores.forEach(([cat, val]) => resposta += `${cat}: R$ ${val.toFixed(2)}\n`);
+        return enviarMensagemComBotoes(telefone, resposta, [
+            { label: 'Receber Dicas', type: 'reply' }, { label: 'Relatório Completo', type: 'reply' }, { label: 'Voltar ao Menu', type: 'reply' }
+        ]);
+    }
+    if (msgLower === 'minhas metas') {
+        if (!usuario.meta) {
+            return enviarMensagemComBotoes(telefone, `Você ainda não tem metas. Definir metas ajuda a conquistar seus objetivos!`,
+                [{ label: 'Criar Meta', type: 'reply' }, { label: 'Voltar ao Menu', type: 'reply' }]
             );
         }
-        return; // Para a execução
+        return processarComando(telefone, 'Ver Progresso', messageCount);
     }
-
-    // --- Processamento Padrão de Comandos (se nenhum estado estiver ativo) ---
-
-    if (msg === 'Menu Principal' || msg === 'Voltar ao Menu' || msg === 'menu' || msg === 'oi') {
-        await enviarMensagemComBotoes(
-            telefone,
-            `Olá, ${dadosMock.nome}\n\n` +
-            `Sou sua assistente financeira do BTG. Como posso ajudar hoje?\n\n`,
-            [
-                { label: 'Ver Saldo', type: 'reply' },
-                { label: 'Meus Gastos', type: 'reply' },
-                { label: 'Minhas Metas', type: 'reply' }
-            ]
-        );
-        return;
+    if (['criar meta', 'criar nova meta'].includes(msgLower)) {
+        conversasAtivas[telefone].state = 'AGUARDANDO_META';
+        return enviarMensagem(telefone, `Ok, vamos criar sua meta!\n\nDiga-me o que você quer alcançar (objetivo, valor e data).`);
     }
-
-    if (msg === 'Ver Saldo') {
-        const analise = analisarHabitos();
-        const statusEmoji = analise.saldoMensal > 1000 ? 'Alto' : analise.saldoMensal > 0 ? 'Médio' : 'Baixo';
-        const mensagemSaldo = `Resumo Financeiro - Status: ${statusEmoji}\n\n` +
-            `Renda mensal: R$ ${dadosMock.renda.toFixed(2)}\n` +
-            `Gastos previstos: R$ ${analise.totalGastos.toFixed(2)}\n` +
-            `Saldo disponível: R$ ${analise.saldoMensal.toFixed(2)}\n\n` +
-            `Você está usando ${analise.porcentagemRenda.toFixed(1)}% da sua renda.\n\n` +
-            (analise.status === 'crítico' ? 'Atenção! Seus gastos estão muito altos!\n\n' : '') +
-            'O que deseja fazer?';
-        const botoes = [];
-        if (analise.saldoMensal > 500) {
-            botoes.push({ label: 'Ver Investimentos', type: 'reply' });
-        }
-        botoes.push({ label: 'Analisar Gastos', type: 'reply' });
-        botoes.push({ label: 'Ver Contas', type: 'reply' });
-        await enviarMensagemComBotoes(telefone, mensagemSaldo, botoes);
-        return;
-    }
-
-    if (msg === 'Meus Gastos' || msg === 'Analisar Gastos' || msg === 'Ver Gastos') {
-        const analise = analisarHabitos();
-        let resposta = `Análise de Gastos - ${new Date().toLocaleDateString('pt-BR', { month: 'long' })}\n\n`;
-        resposta += `Total gasto: R$ ${analise.totalGastos.toFixed(2)}\n`;
-        resposta += `Percentual da renda: ${analise.porcentagemRenda.toFixed(1)}%\n\n`;
-        resposta += `Principais categorias:\n`;
-        analise.categoriasMaiores.forEach((cat, i) => {
-            resposta += `${i + 1}. ${cat[0]}: R$ ${cat[1].toFixed(2)}\n`;
-        });
-        resposta += `\nVocê costuma gastar mais nos dias ${dadosMock.dias_mais_gastos.join(', ')}.\n\n`;
-        resposta += 'O que gostaria de fazer?';
-        await enviarMensagemComBotoes(telefone, resposta, [
-            { label: 'Receber Dicas', type: 'reply' },
-            { label: 'Relatório Completo', type: 'reply' },
-            { label: 'Criar Meta', type: 'reply' }
-        ]);
-        return;
-    }
-
-    if (msg === 'Minhas Metas') {
-        if (!dadosMock.meta) {
-            await enviarMensagemComBotoes(
-                telefone,
-                `Você não tem metas ativas\n\n` +
-                `Definir metas ajuda você a conquistar seus objetivos financeiros!\n\n` +
-                `O que deseja fazer?`,
-                [
-                    { label: 'Criar Meta', type: 'reply' },
-                    { label: 'Como Funciona', type: 'reply' },
-                    { label: 'Voltar ao Menu', type: 'reply' }
-                ]
-            );
-            return;
-        }
-        const progresso = calcularProgressoMeta();
-        const mensagemMeta = `Sua Meta Atual\n\n` +
-            `${dadosMock.meta}\n` +
-            `Valor: R$ ${dadosMock.valor_meta.toFixed(2)}\n` +
-            `Prazo: ${dadosMock.data_fim_meta}\n\n` +
-            `${progresso.mensagem}\n\n` +
-            `O que deseja fazer?`;
-        await enviarMensagemComBotoes(telefone, mensagemMeta, [
-            { label: 'Ver Progresso', type: 'reply' },
-            { label: 'Dicas p/ Meta', type: 'reply' },
-            { label: 'Excluir Meta', type: 'reply' }
-        ]);
-        return;
-    }
-
-    if (msg === 'Criar Meta' || msg === 'Criar Nova Meta') {
-        conversasAtivas[telefone].state = 'AGUARDANDO_META'; // Define o estado
-        await enviarMensagem(
-            telefone,
-            `Ok, vamos criar sua meta!\n\n` +
-            `Diga-me o que você quer alcançar. Por exemplo: "quero juntar 10 mil para uma viagem à praia em 31-12-2026".\n\n` +
-            `Ou use o formato: *meta criar [valor], [descrição], [data]*\n\n` +
-            `A qualquer momento, digite *cancelar* para voltar.`
-        );
-        return;
-    }
-
-    if (msg === 'Contas a Vencer' || msg === 'Ver Contas') {
+     if (['contas a vencer', 'ver contas'].includes(msgLower)) {
         const hoje = new Date().getDate();
-        const proximasContas = dadosMock.contas_recorrentes
-            .filter(c => c.vencimento >= hoje)
-            .sort((a, b) => a.vencimento - b.vencimento);
-        let resposta = 'Próximas Contas a Vencer\n\n';
-        proximasContas.forEach(conta => {
-            const dias = conta.vencimento - hoje;
-            const urgencia = dias <= 3 ? 'Urgente' : dias <= 7 ? 'Atenção' : 'Normal';
-            resposta += `[${urgencia}] ${conta.nome}\n`;
-            resposta += `   R$ ${conta.valor.toFixed(2)} - Vence dia ${conta.vencimento}\n\n`;
-        });
-        const total = proximasContas.reduce((acc, c) => acc + c.valor, 0);
-        resposta += `Total: R$ ${total.toFixed(2)}\n\nO que deseja fazer?`;
-        await enviarMensagemComBotoes(telefone, resposta, [
-            { label: 'Ver Saldo', type: 'reply' },
-            { label: 'Dicas de Economia', type: 'reply' },
-            { label: 'Voltar ao Menu', type: 'reply' }
-        ]);
-        return;
+        const proximas = usuario.contas_recorrentes.filter(c => c.vencimento >= hoje).sort((a, b) => a.vencimento - b.vencimento);
+        if (proximas.length === 0) return enviarMensagem(telefone, "Boas notícias! Nenhuma conta a vencer este mês.");
+        let resposta = 'Próximas Contas:\n\n';
+        proximas.forEach(c => resposta += `${c.nome}\nR$ ${c.valor.toFixed(2)} - Vence dia ${c.vencimento}\n\n`);
+        return enviarMensagemComBotoes(telefone, resposta, [{ label: 'Ver Saldo', type: 'reply' }, { label: 'Voltar ao Menu', type: 'reply' }]);
     }
-
-    if (msg === 'Investir' || msg === 'Ver Investimentos') {
-        const analise = analisarHabitos();
-        if (analise.saldoMensal <= 0) {
-            await enviarMensagemComBotoes(
-                telefone,
-                `Atenção\n\n` +
-                `No momento você não tem saldo disponível para investir.\n\n` +
-                `Mas não desanime! Vamos trabalhar juntos para melhorar isso.`,
-                [
-                    { label: 'Receber Dicas', type: 'reply' },
-                    { label: 'Criar Meta', type: 'reply' },
-                    { label: 'Ver Gastos', type: 'reply' }
-                ]
-            );
-            return;
-        }
-        const sugestao = sugerirInvestimentos(analise.saldoMensal);
-        let resposta = `Sugestões de Investimento\n\n`;
-        resposta += `Baseado no perfil ${sugestao.perfil} e saldo de R$ ${analise.saldoMensal.toFixed(2)}:\n\n`;
-        sugestao.distribuicao.forEach(inv => {
-            resposta += `${inv.nome} (${inv.percentual}%)\n`;
-            resposta += `   R$ ${inv.valor} - Retorno: ${inv.retorno}\n\n`;
-        });
-        resposta += `Essas sugestões são baseadas no perfil e podem ajudar seu dinheiro a render!`;
-        await enviarMensagemComBotoes(telefone, resposta, [
-            { label: 'Quero Investir', type: 'reply' },
-            { label: 'Saber Mais', type: 'reply' },
-            { label: 'Voltar ao Menu', type: 'reply' }
-        ]);
-        return;
+    if (['investir', 'ver investimentos'].includes(msgLower)) {
+        const analise = analisarHabitos(usuario);
+        if (analise.saldoMensal <= 100) return enviarMensagem(telefone, "No momento, seu saldo não é ideal para investir. Foque em organizar seus gastos.");
+        const sugestao = sugerirInvestimentos(usuario, analise.saldoMensal);
+        let resposta = `Sugestões de Investimento (Perfil ${sugestao.perfil}):\n\n`;
+        sugestao.distribuicao.forEach(inv => resposta += `*${inv.nome}* (${inv.percentual}%)\n   R$ ${inv.valor}\n\n`);
+        return enviarMensagemComBotoes(telefone, resposta, [{ label: 'Saber Mais', type: 'reply' }, { label: 'Voltar ao Menu', type: 'reply' }]);
     }
-
-    if (msg === 'Quero Investir') {
-        await enviarMensagemComBotoes(
-            telefone,
-            `Ótima decisão\n\n` +
-            `Nota: Em produção, aqui você seria direcionado para o app do BTG ou atendimento.\n\n` +
-            `Posso ajudar em algo mais?`,
-            [
-                { label: 'Criar Meta', type: 'reply' },
-                { label: 'Receber Dicas', type: 'reply' },
-                { label: 'Voltar ao Menu', type: 'reply' }
-            ]
-        );
-        return;
+    if(['saber mais', 'saber mais sobre investimentos'].includes(msgLower)) {
+        return enviarMensagemComBotoes(telefone, 'Acesse para liberar a função!', [{ label: 'Acessar', type: 'url', url: 'https://investimentos.btgpactual.com/renda-variavel/acoes' }, { label: 'Voltar ao Menu', type: 'reply' }]);
     }
-
-    if (msg === 'Receber Dicas' || msg === 'Dicas de Economia' || msg === 'Dicas p/ Meta' || msg === 'Dicas p/ Atingir') {
-        const analise = analisarHabitos();
-        const dicas = gerarDicasPersonalizadas(analise);
-        const mensagemDicas = `Dicas Personalizadas para Você\n\n${dicas.join('\n\n')}\n\n` +
-            `O que deseja fazer agora?`;
-        await enviarMensagemComBotoes(telefone, mensagemDicas, [
-            { label: 'Ver Gastos', type: 'reply' },
-            { label: 'Criar Meta', type: 'reply' },
-            { label: 'Voltar ao Menu', type: 'reply' }
-        ]);
-        return;
+     if (['receber dicas', 'dicas de economia'].includes(msgLower)) {
+        const analise = analisarHabitos(usuario);
+        const dicas = gerarDicasPersonalizadas(usuario, analise);
+        const mensagemDicas = `💡 Dicas Personalizadas:\n\n- ${dicas.join('\n\n- ')}`;
+        return enviarMensagemComBotoes(telefone, mensagemDicas, [{ label: 'Ver Gastos', type: 'reply' }, { label: 'Voltar ao Menu', type: 'reply' }]);
     }
-
-    if (msg === 'Relatório Completo') {
+     if (msgLower === 'relatório completo') {
         const mes = new Date().getMonth() + 1;
-        const relatorio = gerarRelatorioMensal(mes);
-        await enviarMensagemComBotoes(
-            telefone,
-            relatorio + '\n\nO que deseja fazer?',
-            [
-                { label: 'Receber Dicas', type: 'reply' },
-                { label: 'Ver Investimentos', type: 'reply' },
-                { label: 'Voltar ao Menu', type: 'reply' }
-            ]
-        );
-        return;
+        const relatorio = gerarRelatorioMensal(usuario, mes);
+        return enviarMensagemComBotoes(telefone, relatorio, [{ label: 'Receber Dicas', type: 'reply' }, { label: 'Voltar ao Menu', type: 'reply' }]);
     }
-
-    if (msg === 'Como Funciona' || msg === 'Saber Mais') {
-        await enviarMensagemComBotoes(
-            telefone,
-            `Como funciona o Assistente Financeiro BTG\n\n` +
-            `Eu analiso gastos, renda e hábitos para:\n\n` +
-            `- Avisar sobre contas próximas\n` +
-            `- Sugerir investimentos personalizados\n` +
-            `- Ajudar a criar e acompanhar metas\n` +
-            `- Dar dicas de economia\n` +
-            `- Enviar relatórios mensais\n\n`,
-            [
-                { label: 'Criar Meta', type: 'reply' },
-                { label: 'Ver Investimentos', type: 'reply' },
-                { label: 'Voltar ao Menu', type: 'reply' }
-            ]
-        );
-        return;
+     if (msgLower === 'excluir meta') {
+        usuario.meta = null;
+        usuario.valor_meta = 0;
+        usuario.data_fim_meta = null;
+        return enviarMensagem(telefone, "Meta excluída com sucesso!");
     }
-
-    if (msg === 'Excluir Meta') {
-        dadosMock.meta = null;
-        dadosMock.valor_meta = 0;
-        dadosMock.data_fim_meta = null;
-        await enviarMensagemComBotoes(
-            telefone,
-            `Meta excluída\n\n` +
-            `Quando quiser criar uma nova meta, é só chamar!`,
-            [
-                { label: 'Criar Nova Meta', type: 'reply' },
-                { label: 'Ver Saldo', type: 'reply' },
-                { label: 'Voltar ao Menu', type: 'reply' }
-            ]
+    if (msgLower === 'ver progresso') {
+        if (!usuario.meta) return enviarMensagem(telefone, 'Você não tem metas ativas.');
+        const progresso = calcularProgressoMeta(telefone);
+        if (!progresso) return enviarMensagem(telefone, 'Não foi possível calcular o progresso.');
+        const barra = '🟩'.repeat(Math.floor(progresso.progresso / 10)) + '⬜️'.repeat(10 - Math.floor(progresso.progresso / 10));
+        return enviarMensagemComBotoes(telefone, `*Meta: ${usuario.meta}*\n${barra} ${progresso.progresso.toFixed(1)}%\n\n${progresso.mensagem}`,
+            [{ label: 'Excluir Meta', type: 'reply' }, { label: 'Voltar ao Menu', type: 'reply' }]
         );
-        return;
     }
+    
+    // --- Fallback Inteligente com IA ---
+    const [analiseIA, analiseModeloLocal] = await Promise.all([
+        analisarTextoComIA(msg),
+        classificarComModeloLocal(msg)
+    ]);
+    const temaFinal = decidirTemaFinal(analiseIA, analiseModeloLocal);
 
-    if (msg === 'Ver Progresso') {
-        if (!dadosMock.meta) {
-            await enviarMensagem(telefone, 'Você não tem metas ativas no momento.');
-            return;
-        }
-        const progresso = calcularProgressoMeta();
-        const porcentagem = (progresso.progresso || 0).toFixed(1);
-        let barraProgresso = '';
-        const blocosCheios = Math.floor(progresso.progresso / 10);
-        for (let i = 0; i < 10; i++) {
-            barraProgresso += i < blocosCheios ? '█' : '░';
-        }
-        await enviarMensagemComBotoes(
-            telefone,
-            `Progresso da Meta\n\n` +
-            `${barraProgresso} ${porcentagem}%\n\n` +
-            `${progresso.mensagem}`,
-            [
-                { label: 'Dicas p/ Atingir', type: 'reply' },
-                { label: 'Ver Investimentos', type: 'reply' },
-                { label: 'Voltar ao Menu', type: 'reply' }
-            ]
-        );
-        return;
+    switch (temaFinal) {
+        case "Metas":
+            return apresentarMetaParaConfirmacao(telefone, analiseIA.dados_extraidos || {});
+        case "Investimentos":
+            return processarComando(telefone, 'Ver Investimentos', messageCount);
+        case "Gastos":
+            return processarComando(telefone, 'Meus Gastos', messageCount);
+        default:
+            if (temaFinal === 'Nenhum' && messageCount === 1) {
+                console.log("[Lógica] Primeiro contato e tema 'Nenhum'. Exibindo menu principal.");
+                return processarComando(telefone, 'Menu Principal', messageCount);
+            }
+            return enviarMensagemComBotoes(telefone, `Desculpe, não entendi o que você quis dizer.\n\nPode tentar de novo ou escolher uma opção:`,
+                [{ label: 'Menu Principal', type: 'reply' }, { label: 'Como Funciona', type: 'reply' }]
+            );
     }
-
-    await enviarMensagemComBotoes(
-        telefone,
-        `Desculpe, não entendi.\n\nEscolha uma das opções abaixo:`,
-        [
-            { label: 'Menu Principal', type: 'reply' },
-            { label: 'Como Funciona', type: 'reply' },
-            { label: 'Receber Dicas', type: 'reply' }
-        ]
-    );
 }
 
 // --- CONFIGURAÇÃO DO SERVIDOR EXPRESS (WEBHOOK) ---
 app.post('/webhook/zapster', async (req, res) => {
     try {
-        console.log('Webhook Payload Recebido:', JSON.stringify(req.body, null, 2));
         const telefone = req.body.data?.sender?.id;
         const message = req.body.data?.content?.text;
-        if (!telefone || typeof message === 'undefined') {
-            console.log('⚠️ Webhook recebido, mas sem "telefone" ou "message" nos campos esperados. Ignorando.');
-            return res.status(200).json({ success: true, status: 'ignored, missing data' });
-        }
-        console.log(`📱 Mensagem recebida de ${telefone}: ${message}`);
+        if (!telefone || !message) return res.sendStatus(200);
+        
+        console.log(`📱 Mensagem de ${telefone}: ${message}`);
         if (!conversasAtivas[telefone]) {
-            console.log(`Novo usuário: ${telefone}`);
-            conversasAtivas[telefone] = { dataInicio: new Date() };
-            // Na primeira mensagem, não processa comando, apenas inicia a conversa.
-            await processarComando(telefone, 'oi');
-        } else {
-            await processarComando(telefone, message);
+            conversasAtivas[telefone] = { state: null, messageCount: 0 };
         }
-        res.status(200).json({ success: true, status: 'ok' });
+        conversasAtivas[telefone].messageCount++;
+        
+        await processarComando(telefone, message, conversasAtivas[telefone].messageCount);
+        res.status(200).json({ status: 'ok' });
     } catch (error) {
-        console.error('❌ Erro no webhook:', error.response?.data || error.message || error);
-        res.status(500).json({ error: 'Erro ao processar mensagem' });
+        console.error('❌ Erro no webhook:', error);
+        res.status(500).json({ error: 'Erro ao processar' });
     }
 });
 
-app.get('/', (req, res) => {
-    res.json({
-        status: 'online',
-        bot: 'Assistente Virtual BTG',
-        versao: 'Protótipo',
-        descricao: 'Bot para auxiliar no gerenciamento financeiro',
-        endpoints: {
-            webhook: '/webhook/zapster',
-            status: '/',
-            dados: '/dados-mock'
-        }
-    });
-});
-
-app.get('/dados-mock', (req, res) => {
-    res.json({
-        usuario: dadosMock,
-        analise: analisarHabitos()
-    });
-});
+app.get('/', (req, res) => res.json({ status: 'online', bot: 'Assistente BTG', versao: '3.6' }));
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
-    console.log(`Servidor rodando na porta ${PORT}`);
+    console.log(`✅ Servidor rodando na porta ${PORT}`);
+    console.log(`📊 Bot BTG v3.6 (Menu Inteligente)`);
 });
 
