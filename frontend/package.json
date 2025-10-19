@@ -1,0 +1,19 @@
+{
+  "name": "chatbot-btg",
+  "version": "1.0.0",
+  "description": "Chatbot Financeiro BTG para WhatsApp",
+  "main": "bot.js",
+  "scripts": {
+    "start": "node bot.js",
+    "dev": "nodemon bot.js"
+  },
+  "dependencies": {
+    "axios": "^1.12.2",
+    "dotenv": "^16.6.1",
+    "express": "^4.21.2",
+    "node-cron": "^3.0.3"
+  },
+  "devDependencies": {
+    "nodemon": "^3.0.1"
+  }
+}
